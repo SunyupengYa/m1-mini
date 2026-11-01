@@ -366,81 +366,47 @@ public class Chat {
      * </ul>
      */
     static void readSse(InputStream in, java.util.function.Consumer<String> onData) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-
-        StringBuilder buf = new StringBuilder();
-        // 缓冲开小是故意的：开 8KB 一次就读完一整片，半包问题会被完全掩盖。
-        // 调试模式下再缩到 16 字符，强制把一个事件切成好几段 —— 这样你才能亲眼看到半包。
-        char[] chunk = new char[DEBUG_SSE ? 16 : 256];
-        int n;
-
-        while ((n = reader.read(chunk)) != -1) {
-            buf.append(chunk, 0, n);
-
-            if (DEBUG_SSE) {
-                System.err.println("[recv " + n + "] "
-                        + new String(chunk, 0, n).replace("\r", "\\r").replace("\n", "\\n"));
-            }
-
-            int[] bd;
-            while ((bd = boundary(buf)) != null) {
-                String block = buf.substring(0, bd[0]);
-                buf.delete(0, bd[0] + bd[1]);   // 消费掉事件块 + 分隔符
-
-                String data = extractData(block);
-                if (data.isEmpty()) {
-                    continue;
-                }
-                if ("[DONE]".equals(data)) {
-                    return;                      // 后面的数据一律丢掉
-                }
-                onData.accept(data);
-            }
-        }
-
-        // 有些服务端最后一条事件后面没有空行就断开了。
-        // 不做这一步的表现是：前面都正常，最后一句总是少几个字。
-        String rest = extractData(buf.toString());
-        if (!rest.isEmpty() && !"[DONE]".equals(rest)) {
-            onData.accept(rest);
-        }
+        // ============================================================
+        // TODO ①【核心】手写 SSE 解析 —— M1 最值得花时间的一处
+        //
+        // 要说清的三件事（面试必问）：
+        //   1. 缓冲区为什么必须存在（半包）
+        //   2. 分隔符有两种形态
+        //   3. [DONE] 之后的数据要丢掉
+        //
+        // 具体步骤：
+        //   a. 用 BufferedReader + InputStreamReader(UTF_8) 包住 in
+        //   b. char[] 缓冲大小取 (DEBUG_SSE ? 16 : 256) —— 开大了半包永远不出现
+        //   c. 主循环 reader.read(chunk)，返回 -1 结束；每次读到就 append 到 StringBuilder buf
+        //   d. 内层 while：调 boundary(buf) 找分隔符，找不到就退出内层（半包，等下批数据）
+        //      找到了就：cut 出事件块 → delete 掉「块+分隔符」→ extractData 取 data
+        //      → 空串跳过 → "[DONE]" 直接 return → 否则 onData.accept
+        //   e. 循环结束后再 flush 一次残留（服务端可能不发结尾空行）
+        // ============================================================
+        throw new UnsupportedOperationException("TODO ①: Chat.readSse 未实现");
     }
 
     /** 找事件分隔符的位置和长度；找不到返回 null（说明还是半包，正常）。 */
     static int[] boundary(StringBuilder buf) {
-        int lf = buf.indexOf("\n\n");
-        int crlf = buf.indexOf("\r\n\r\n");
-        if (lf < 0 && crlf < 0) {
-            return null;
-        }
-        if (crlf < 0) {
-            return new int[]{lf, 2};
-        }
-        if (lf < 0) {
-            return new int[]{crlf, 4};
-        }
-        return lf < crlf ? new int[]{lf, 2} : new int[]{crlf, 4};
+        // TODO ①-a：返回 {位置, 长度}
+        //   "\n\n"      → 长度 2
+        //   "\r\n\r\n"  → 长度 4
+        //   都找不到 → null；两个都找到 → 取更靠前的那个
+        //
+        // 常见错误：只认 \n\n。碰到发 CRLF 的服务端就永远不产出事件，
+        // 表现是「界面一个字节都不显示」，而且极难看出是哪里的问题。
+        throw new UnsupportedOperationException("TODO ①-a: Chat.boundary 未实现");
     }
 
     /** 从一个事件块里取出 data 内容（剥掉前缀、跳过注释行、多行拼接）。 */
     static String extractData(String block) {
-        StringBuilder sb = new StringBuilder();
-        for (String line : block.split("\r?\n")) {
-            if (line.isEmpty() || line.startsWith(":")) {
-                continue;
-            }
-            if (line.startsWith("data:")) {
-                String v = line.substring(5);
-                if (v.startsWith(" ")) {
-                    v = v.substring(1);     // 规范允许冒号后有一个空格
-                }
-                if (sb.length() > 0) {
-                    sb.append('\n');
-                }
-                sb.append(v);
-            }
-        }
-        return sb.toString();
+        // TODO ①-b：按行处理一个事件块
+        //   空行                → 跳过
+        //   以 ":" 开头          → 心跳注释，跳过
+        //   以 "data:" 开头      → 取冒号后的内容；规范允许一个前导空格，吃掉它
+        //                         多行 data 要用 \n 拼接（少见，但规范如此）
+        //   其余行               → 忽略
+        throw new UnsupportedOperationException("TODO ①-b: Chat.extractData 未实现");
     }
 
     // ================================================================
@@ -500,19 +466,17 @@ public class Chat {
      * 一旦除不尽（比如除以 3）就直接抛 ArithmeticException —— 这是 BigDecimal 最常见的线上事故。
      */
     static BigDecimal cost(int pin, int pout, int phit) {
-        // 厂商偶尔返回 hit > pin 的脏数据，不夹一下会算出负金额
-        int hit = Math.max(0, Math.min(phit, pin));
-        int miss = pin - hit;
-
-        BigDecimal amount = PRICE_HIT.multiply(BigDecimal.valueOf(hit))
-                .add(PRICE_IN.multiply(BigDecimal.valueOf(miss)))
-                .add(PRICE_OUT.multiply(BigDecimal.valueOf(pout)));
-
-        if (!PEAK) {
-            // 官方口径：空闲时段 = 高峰价的一半
-            amount = amount.multiply(HALF);
-        }
-        return amount.divide(MILLION, MONEY_SCALE, RoundingMode.HALF_UP);
+        // TODO ②-a：三段相加，再按峰谷折价（整个方法 8 行）
+        //   缓存命中   hit         × PRICE_HIT
+        //   未命中     (pin - hit) × PRICE_IN
+        //   输出       pout        × PRICE_OUT
+        //   相加后，非高峰时段再 multiply(HALF)
+        //   最后 divide(MILLION, MONEY_SCALE, RoundingMode.HALF_UP)
+        //
+        // 坑一：divide 不写 scale + RoundingMode，遇到除不尽直接抛 ArithmeticException。
+        //      这是 BigDecimal 最常见的线上事故 —— 本地跑一百次没事，上线就崩。
+        // 坑二：厂商偶尔返回 hit > pin 的脏数据，先 Math.min 夹一下，否则算出负金额。
+        throw new UnsupportedOperationException("TODO ②-a: Chat.cost 未实现");
     }
 
     /**
@@ -526,35 +490,15 @@ public class Chat {
     /** 一次调用记一行：屏幕一行 + 追加到 logs/calls.log。 */
     static void bill(String scene, boolean ok, int pin, int pout, int phit,
                      long ttft, long total, String err) {
-        BigDecimal c = cost(pin, pout, phit);
-        int hit = Math.max(0, Math.min(phit, pin));
-
-        nCalls++;
-        nIn += pin;
-        nOut += pout;
-        nHit += hit;
-        nCost = nCost.add(c);
-        if (ok) {
-            LATENCIES.add(total);
-        }
-
-        // 日志存 toPlainString，不做格式化 —— 以后想用脚本重新算账，原始值才好用
-        String line = String.format("%s\t%s\t%s\t%s\tin=%d\tout=%d\thit=%d\tcost=%s\tttft=%s\ttotal=%dms%s",
-                Instant.now(), scene, ok ? "OK" : "FAIL", MODEL, pin, pout, hit, c.toPlainString(),
-                ttft < 0 ? "-" : ttft + "ms", total,
-                err == null ? "" : "\terr=" + err.replace('\n', ' '));
-
-        try {
-            Files.createDirectories(LOG.getParent());
-            Files.writeString(LOG, line + System.lineSeparator(), StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        } catch (IOException e) {
-            System.err.println("[记账失败] " + e.getMessage());
-        }
-
-        System.out.printf("[账单] %s in=%d out=%d %s ttft=%s total=%dms%s%n",
-                scene, pin, pout, money(c),
-                ttft < 0 ? "-" : ttft + "ms", total, ok ? "" : " 失败");
+        // TODO ②-b：四步
+        //   1. cost(pin, pout, phit) 算钱
+        //   2. 累加 nCalls / nIn / nOut / nHit / nCost
+        //      nCost 是 BigDecimal，必须 add()，写成 += 会退化成 double 精度
+        //      ok 时把 total 塞进 LATENCIES（P95 要用）
+        //   3. 拼一行 TSV 追加到 LOG：时间 场景 成败 in out hit cost ttft total [err]
+        //      金额用 c.toPlainString()，用 toString 会变成 5.85E-5 这种科学计数法
+        //   4. 屏幕打一行给人看，失败时带上原因
+        throw new UnsupportedOperationException("TODO ②-b: Chat.bill 未实现");
     }
 
     static void stats() {
