@@ -3,6 +3,7 @@ package m1;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import m1.utils.DeepSeekPricingUtils;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -18,16 +19,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.DayOfWeek;
-import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalTime;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.time.Duration;
+import java.util.*;
 
 /**
  * M1 最小版：一个文件说清「一次模型调用到底发生了什么」。
@@ -59,20 +53,26 @@ public class Chat {
     static String BASE = env("M1_BASE_URL", "https://api.deepseek.com");
     static String KEY = env("M1_API_KEY", env("DEEPSEEK_API_KEY", ""));
     static String MODEL = env("M1_MODEL", "deepseek-v4-flash");
+    static String THINKING_TYPE = env("M1_THINKING_TYPE", "disabled");
 
     /**
-     * 单价：<b>元 / 百万 token</b>，按官方美元牌价折算（1 USD ≈ 6.67 CNY，2026-11-01 核对）。
+     * 单价：<b>元 / 百万 token</b>，取自 DeepSeek 官方<b>中文价目表</b>（2026-11-01 核对）。
      *
-     * <p>deepseek-v4-flash 官方牌价：输入（未命中）谷值 $0.15 / 高峰 $0.30，
-     * 输出谷值 $0.60 / 高峰 $1.20，缓存命中谷值 $0.007 / 高峰 $0.014（每百万 token）。
-     * 折算成人民币后取高峰价作为默认值；空闲时段官方按半价计，这里自动折半，见 {@link #PEAK}。
+     * <p>deepseek-flash 官方人民币牌价：输入（未命中）谷值 ¥1 / 高峰 ¥2，
+     * 输出谷值 ¥4 / 高峰 ¥8，缓存命中谷值 ¥0.02 / 高峰 ¥0.04（每百万 token）。
+     * 默认值取<b>高峰价</b>；空闲时段官方按半价计，这里自动折半，见 {@link #peakNow()}。
+     *
+     * <p>注意：中文价目表的缓存命中价（¥0.04 峰）与美元牌价折算（$0.014×6.67≈¥0.093）
+     * 不一致，人民币计费以中文页为准 —— 别用汇率折算覆盖官方人民币标价。
      *
      * <p><b>价格变动很频繁，跑之前去官网核对一遍</b>：
-     * api-docs.deepseek.com/quick_start/pricing
+     * api-docs.deepseek.com/zh-cn/quick_start/pricing
      */
     static final BigDecimal PRICE_IN = dec("M1_PRICE_IN", "2.0");      // 输入，缓存未命中
+
+    static final BigDecimal PRICE_HIT = dec("M1_PRICE_HIT", "0.04");   // 输入，缓存命中
+
     static final BigDecimal PRICE_OUT = dec("M1_PRICE_OUT", "8.0");    // 输出
-    static final BigDecimal PRICE_HIT = dec("M1_PRICE_HIT", "0.09");   // 输入，缓存命中
 
     static final String CUR = "¥";
 
@@ -82,18 +82,18 @@ public class Chat {
     static final BigDecimal HALF = new BigDecimal("0.5");
 
     /**
-     * 当前是否高峰时段。
+     * 当前是否高峰时段（每次调用实时判定，不再类初始化时焊死）。
      *
-     * <p>DeepSeek 2026-08-17 起实行峰谷定价：北京时间工作日 9:00-12:00、14:00-18:00
-     * 为高峰（全价），其余时段（含周末）半价。法定节假日也算空闲，但代码判断不出来，
-     * 节假日跑实验会略微高估成本 —— 这点误差可以接受，方向是保守的。
+     * <p>DeepSeek 峰谷定价：北京时间工作日 9:00-12:00、14:00-18:00 为高峰（全价），
+     * 其余时段（含周末与法定节假日）半价。时段判定统一收敛在
+     * {@link DeepSeekPricingUtils}，本方法只负责 M1_PEAK 强制开关：
+     * {@code peak} / {@code off} / {@code auto}（默认，走工具类实时判断）。
      *
-     * <p>用 M1_PEAK 强制指定：{@code peak} / {@code off} / {@code auto}（默认）。
-     * 进程启动时算一次并缓存：CLI 会话一般不跨时段，跨了也就是几分钱的偏差。
+     * <p>为什么不再用 {@code static final} 缓存：CLI 跨时段只是几分钱偏差，
+     * 但这个写法一旦搬进长驻进程（Agent 服务挂一整天），峰谷口径就会和服务端
+     * 实际计费漂移 —— 计费判定必须跟着每次请求的实际时刻走。
      */
-    static final boolean PEAK = isPeak();
-
-    static boolean isPeak() {
+    static boolean peakNow() {
         String mode = env("M1_PEAK", "auto");
         if ("peak".equals(mode)) {
             return true;
@@ -101,15 +101,7 @@ public class Chat {
         if ("off".equals(mode)) {
             return false;
         }
-        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
-        DayOfWeek dow = now.getDayOfWeek();
-        if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) {
-            return false;
-        }
-        LocalTime t = now.toLocalTime();
-        boolean morning = !t.isBefore(LocalTime.of(9, 0)) && t.isBefore(LocalTime.of(12, 0));
-        boolean afternoon = !t.isBefore(LocalTime.of(14, 0)) && t.isBefore(LocalTime.of(18, 0));
-        return morning || afternoon;
+        return DeepSeekPricingUtils.isPeakNow(null);
     }
 
     /** 置 1 会把每次 read 到的原始片段打出来 —— 半包实验的关键开关。 */
@@ -420,6 +412,7 @@ public class Chat {
         body.put("messages", messages);
         body.put("stream", stream);
         body.put("temperature", TEMP);
+//        body.put("thinking", Map.of("type",THINKING_TYPE));
         if (stream) {
             // 少了这一行，最后一片不会带 usage，账单永远算不准
             body.put("stream_options", Map.of("include_usage", true));
@@ -467,6 +460,19 @@ public class Chat {
      * 一旦除不尽（比如除以 3）就直接抛 ArithmeticException —— 这是 BigDecimal 最常见的线上事故。
      */
     static BigDecimal cost(int pin, int pout, int phit) {
+        if (phit > pin){
+            pin = phit;
+        }
+        boolean peak = peakNow();
+        BigDecimal pHitPrice = PRICE_HIT.multiply(new BigDecimal(phit));
+        BigDecimal pMissPrice = PRICE_IN.multiply(new BigDecimal(pin - phit));
+        BigDecimal pOutPrice = PRICE_OUT.multiply(new BigDecimal(pout));
+        BigDecimal totalPrice = pHitPrice.add(pMissPrice).add(pOutPrice);
+        if (!peak){
+            totalPrice = totalPrice.multiply(HALF);
+        }
+        return totalPrice.divide(MILLION,MONEY_SCALE, RoundingMode.HALF_UP);
+
         // TODO ②-a：三段相加，再按峰谷折价（逻辑约 6 行）
         //   缓存命中   hit         × PRICE_HIT
         //   未命中     (pin - hit) × PRICE_IN
@@ -477,7 +483,7 @@ public class Chat {
         // 坑一：divide 不写 scale + RoundingMode，遇到除不尽直接抛 ArithmeticException。
         //      这是 BigDecimal 最常见的线上事故 —— 本地跑一百次没事，上线就崩。
         // 坑二：厂商偶尔返回 hit > pin 的脏数据，先 Math.min 夹一下，否则算出负金额。
-        throw new UnsupportedOperationException("TODO ②-a: Chat.cost 未实现");
+//        throw new UnsupportedOperationException("TODO ②-a: Chat.cost 未实现");
     }
 
     /**
@@ -491,6 +497,30 @@ public class Chat {
     /** 一次调用记一行：屏幕一行 + 追加到 logs/calls.log。 */
     static void bill(String scene, boolean ok, int pin, int pout, int phit,
                      long ttft, long total, String err) {
+        BigDecimal cost = cost(pin, pout, phit);
+        nCalls++;
+        nIn += pin;
+        nHit += phit;
+        nOut += pout;
+        nCost = nCost.add(cost);
+        if (ok){
+            LATENCIES.add(total);
+        }
+        Date now = new Date();
+        String logStr = """
+                时间(time)     %tF %tT
+                场景(scene)    %s
+                成败(success)  %s
+                输入token(pin)  %d
+                输出token(pout) %d
+                缓存命中(phit)  %d
+                首token耗时(ttft) %dms
+                总耗时(total)  %dms
+                金额（cost)   %s
+                错误(err)      %s
+                """.formatted(now,now,scene,ok ? "成功" : "失败", pin,pout, phit,ttft, total,cost.toPlainString(),err);
+        writeLog(logStr);
+        System.out.println(logStr);
         // TODO ②-b：四步，约 12 行
         //   1. BigDecimal c = cost(pin, pout, phit);
         //   2. 累加：nCalls++ / nIn += pin / nOut += pout / nHit += hit
@@ -500,7 +530,7 @@ public class Chat {
         //      拼串内容：时间 场景 成败 in out hit cost ttft total [err]
         //      金额用 c.toPlainString()，toString 会变成 5.85E-5
         //   4. System.out.printf 打一行给人看，失败时带上原因
-        throw new UnsupportedOperationException("TODO ②-b: Chat.bill 未实现");
+//        throw new UnsupportedOperationException("TODO ②-b: Chat.bill 未实现");
     }
 
     /** 把一行日志追加到 logs/calls.log。这是 IO 样板，不是学习点，直接给你。 */
@@ -533,14 +563,14 @@ public class Chat {
                 平均延迟 %dms   P95 %dms
                 日志     %s
                 """, nCalls, nIn, nHit, nOut, money(nCost),
-                PEAK ? "高峰时段（全价）" : "空闲时段（半价）",
+                peakNow() ? "高峰时段（全价）" : "空闲时段（半价）",
                 priceText(PRICE_IN), priceText(PRICE_OUT),
                 avg, p95, LOG.toAbsolutePath());
     }
 
     /** 当前生效单价（已按峰谷折算），只用于展示。 */
     static String priceText(BigDecimal peakPrice) {
-        return money(PEAK ? peakPrice : peakPrice.multiply(HALF));
+        return money(peakNow() ? peakPrice : peakPrice.multiply(HALF));
     }
 
     // ================================================================
@@ -593,7 +623,7 @@ public class Chat {
         System.out.println("端点 " + BASE + "/chat/completions");
         System.out.println("单价 in=" + priceText(PRICE_IN) + "/1M  out=" + priceText(PRICE_OUT)
                 + "/1M  cacheHit=" + priceText(PRICE_HIT) + "/1M  → "
-                + (PEAK ? "高峰时段，全价" : "空闲时段，半价"));
+                + (peakNow() ? "高峰时段，全价" : "空闲时段，半价"));
         System.out.println("命令 /sync  /stream  /clear  /stats  /exit     (M1_DEBUG_SSE=1 看原始分片)");
     }
 
