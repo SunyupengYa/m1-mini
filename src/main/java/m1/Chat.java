@@ -1,12 +1,15 @@
 package m1;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -15,8 +18,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,7 +37,7 @@ import java.util.Map;
  *
  * <h2>刻意不做的事</h2>
  * 不建 DTO、不写 Builder、不分层、不用 record —— 全部用 {@code Map} 拼请求、
- * 用 {@link JsonNode} 取响应。代价是丢掉类型安全和编译期检查，换来的是
+ * 用 {@link JSONObject} 取响应。代价是丢掉类型安全和编译期检查，换来的是
  * 你能一眼看到「发出去的报文长什么样、收回来的是什么」。
  *
  * <h2>怎么读这个文件</h2>
@@ -53,11 +60,56 @@ public class Chat {
     static String KEY = env("M1_API_KEY", env("DEEPSEEK_API_KEY", ""));
     static String MODEL = env("M1_MODEL", "deepseek-v4-flash");
 
-    /** 单价：每 100 万 token 多少钱，和官网口径一致。跑前务必核对。 */
-    static double PRICE_IN = dbl("M1_PRICE_IN", 0.14);
-    static double PRICE_OUT = dbl("M1_PRICE_OUT", 0.28);
-    static double PRICE_HIT = dbl("M1_PRICE_HIT", 0.0028);
-    static String CUR = env("M1_CURRENCY", "$");
+    /**
+     * 单价：<b>元 / 百万 token</b>，和官网中文价目表口径一致。
+     *
+     * <p>默认值是 deepseek 高峰时段价（2026-08-17 调价后）。空闲时段官方按半价计，
+     * 这里会自动折半，见 {@link #PEAK}。
+     *
+     * <p><b>价格变动很频繁，跑之前去官网核对一遍</b>：
+     * api-docs.deepseek.com/zh-cn/quick_start/pricing
+     */
+    static final BigDecimal PRICE_IN = dec("M1_PRICE_IN", "3");      // 输入，缓存未命中
+    static final BigDecimal PRICE_OUT = dec("M1_PRICE_OUT", "9");    // 输出
+    static final BigDecimal PRICE_HIT = dec("M1_PRICE_HIT", "0.1");  // 输入，缓存命中
+
+    static final String CUR = "¥";
+
+    /** 金额保留 10 位小数：单 token 最低成本约 1e-7 元，再多位没有意义。 */
+    static final int MONEY_SCALE = 10;
+    static final BigDecimal MILLION = BigDecimal.valueOf(1_000_000);
+    static final BigDecimal HALF = new BigDecimal("0.5");
+
+    /**
+     * 当前是否高峰时段。
+     *
+     * <p>DeepSeek 2026-08-17 起实行峰谷定价：北京时间工作日 9:00-12:00、14:00-18:00
+     * 为高峰（全价），其余时段（含周末）半价。法定节假日也算空闲，但代码判断不出来，
+     * 节假日跑实验会略微高估成本 —— 这点误差可以接受，方向是保守的。
+     *
+     * <p>用 M1_PEAK 强制指定：{@code peak} / {@code off} / {@code auto}（默认）。
+     * 进程启动时算一次并缓存：CLI 会话一般不跨时段，跨了也就是几分钱的偏差。
+     */
+    static final boolean PEAK = isPeak();
+
+    static boolean isPeak() {
+        String mode = env("M1_PEAK", "auto");
+        if ("peak".equals(mode)) {
+            return true;
+        }
+        if ("off".equals(mode)) {
+            return false;
+        }
+        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
+        DayOfWeek dow = now.getDayOfWeek();
+        if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) {
+            return false;
+        }
+        LocalTime t = now.toLocalTime();
+        boolean morning = !t.isBefore(LocalTime.of(9, 0)) && t.isBefore(LocalTime.of(12, 0));
+        boolean afternoon = !t.isBefore(LocalTime.of(14, 0)) && t.isBefore(LocalTime.of(18, 0));
+        return morning || afternoon;
+    }
 
     /** 置 1 会把每次 read 到的原始片段打出来 —— 半包实验的关键开关。 */
     static boolean DEBUG_SSE = "1".equals(env("M1_DEBUG_SSE", "0"));
@@ -65,7 +117,6 @@ public class Chat {
     /** 请求超时（秒）。注意这是「整个响应」的超时，不是首字节超时。 */
     static int TIMEOUT_SEC = (int) dbl("M1_TIMEOUT", 120);
 
-    static final ObjectMapper JSON = new ObjectMapper();
     static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
@@ -82,7 +133,10 @@ public class Chat {
 
     // 累计账
     static int nCalls, nIn, nOut, nHit;
-    static double nCost;
+
+    /** 累计金额。用 BigDecimal 累加，避免几百次调用后误差肉眼可见。 */
+    static BigDecimal nCost = BigDecimal.ZERO;
+
     static final List<Long> LATENCIES = new ArrayList<>();
 
     // ================================================================
@@ -190,18 +244,21 @@ public class Chat {
             throw new RuntimeException("HTTP " + resp.statusCode() + " " + brief(resp.body()));
         }
 
-        JsonNode root = JSON.readTree(resp.body());
+        JSONObject root = JSON.parseObject(resp.body());
 
-        // path() 比 get() 安全：中间任何一层缺失都返回 MissingNode，asText("") 给默认值，不会 NPE
-        String content = root.path("choices").path(0).path("message").path("content").asText("");
+        // fastjson 没有 Jackson 的 MissingNode 兜底：任何一层都可能是 null，
+        // 所以必须逐层判空，不能一路 .getString() 链下去
+        JSONObject choice = firstChoice(root);
+        JSONObject msg = choice == null ? null : choice.getJSONObject("message");
+        String content = msg == null ? "" : msg.getString("content");
         System.out.println("\n助手> " + content);
         HISTORY.add(Map.of("role", "assistant", "content", content));
 
-        JsonNode u = root.path("usage");
+        JSONObject u = root.getJSONObject("usage");
         bill("sync", true,
-                u.path("prompt_tokens").asInt(),
-                u.path("completion_tokens").asInt(),
-                u.path("prompt_cache_hit_tokens").asInt(),
+                u == null ? 0 : u.getIntValue("prompt_tokens"),
+                u == null ? 0 : u.getIntValue("completion_tokens"),
+                u == null ? 0 : u.getIntValue("prompt_cache_hit_tokens"),
                 -1, ms, null);
     }
 
@@ -231,18 +288,22 @@ public class Chat {
         System.out.flush();
 
         readSse(resp.body(), data -> {
-            JsonNode chunk;
+            JSONObject chunk;
             try {
-                chunk = JSON.readTree(data);
+                chunk = JSON.parseObject(data);
             } catch (Exception e) {
                 // 单片坏了不要炸整条流：记一笔，跳过
                 System.err.println("[跳过坏片] " + brief(data));
                 return;
             }
 
+            // 最后一片的 choices 是空数组，firstChoice 返回 null —— 这里就是最容易 NPE 的地方
+            JSONObject choice = firstChoice(chunk);
+            JSONObject d = choice == null ? null : choice.getJSONObject("delta");
+
             // delta.content 是增量片段，不是完整文本 —— 直接 append
-            String delta = chunk.path("choices").path(0).path("delta").path("content").asText("");
-            if (!delta.isEmpty()) {
+            String delta = d == null ? null : d.getString("content");
+            if (delta != null && !delta.isEmpty()) {
                 if (ttft[0] < 0) {
                     ttft[0] = System.currentTimeMillis() - t0;
                 }
@@ -251,17 +312,17 @@ public class Chat {
                 System.out.flush();     // 不 flush 的话终端会攒着，看起来像「没有流式」
             }
 
-            String fr = chunk.path("choices").path(0).path("finish_reason").asText("");
-            if (!fr.isEmpty()) {
+            String fr = choice == null ? null : choice.getString("finish_reason");
+            if (fr != null && !fr.isEmpty()) {
                 finish[0] = fr;
             }
 
-            // usage 只出现在最后一片，而且那片 choices 是空数组
-            JsonNode u = chunk.path("usage");
-            if (u.isObject()) {
-                usage[0] = u.path("prompt_tokens").asInt();
-                usage[1] = u.path("completion_tokens").asInt();
-                usage[2] = u.path("prompt_cache_hit_tokens").asInt();
+            // usage 只出现在最后一片，那片没有 choice，只有 usage
+            JSONObject u = chunk.getJSONObject("usage");
+            if (u != null) {
+                usage[0] = u.getIntValue("prompt_tokens");
+                usage[1] = u.getIntValue("completion_tokens");
+                usage[2] = u.getIntValue("prompt_cache_hit_tokens");
             }
         });
 
@@ -396,7 +457,7 @@ public class Chat {
             // 少了这一行，最后一片不会带 usage，账单永远算不准
             body.put("stream_options", Map.of("include_usage", true));
         }
-        return JSON.writeValueAsString(body);
+        return JSON.toJSONString(body);
     }
 
     /** 非流式：等整个响应结束，BodyHandlers.ofString 一次性返回。 */
@@ -427,26 +488,59 @@ public class Chat {
     // D4：记账
     // ================================================================
 
+    /**
+     * 折算单次金额（元）。
+     *
+     * <p>为什么用 BigDecimal 而不是 double：不是因为现在有精度问题（单次误差在 1e-12 量级，
+     * 对任何决策都没影响），而是两个更实在的理由 ——
+     * 一是展示要稳定，double 格式化出来会出现 0.0000039999999 这种；
+     * 二是这类代码迟早会被复制到真要对账的地方，那时误差就不能容忍了。
+     *
+     * <p><b>关键坑</b>：{@code divide} 必须显式给 scale 和 RoundingMode。不给的话，
+     * 一旦除不尽（比如除以 3）就直接抛 ArithmeticException —— 这是 BigDecimal 最常见的线上事故。
+     */
+    static BigDecimal cost(int pin, int pout, int phit) {
+        // 厂商偶尔返回 hit > pin 的脏数据，不夹一下会算出负金额
+        int hit = Math.max(0, Math.min(phit, pin));
+        int miss = pin - hit;
+
+        BigDecimal amount = PRICE_HIT.multiply(BigDecimal.valueOf(hit))
+                .add(PRICE_IN.multiply(BigDecimal.valueOf(miss)))
+                .add(PRICE_OUT.multiply(BigDecimal.valueOf(pout)));
+
+        if (!PEAK) {
+            // 官方口径：空闲时段 = 高峰价的一半
+            amount = amount.multiply(HALF);
+        }
+        return amount.divide(MILLION, MONEY_SCALE, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 金额 → 字符串。必须用 {@code toPlainString()}：BigDecimal 的 toString
+     * 在值很小时会输出「4E-7」这种科学计数法，日志里既难读，也会把解析日志的脚本坑死。
+     */
+    static String money(BigDecimal v) {
+        return CUR + v.stripTrailingZeros().toPlainString();
+    }
+
     /** 一次调用记一行：屏幕一行 + 追加到 logs/calls.log。 */
     static void bill(String scene, boolean ok, int pin, int pout, int phit,
                      long ttft, long total, String err) {
-        // 缓存命中部分按缓存价算，剩下按输入价。hit 比 pin 大是脏数据，先夹一下
+        BigDecimal c = cost(pin, pout, phit);
         int hit = Math.max(0, Math.min(phit, pin));
-        double c = hit / 1_000_000.0 * PRICE_HIT
-                + (pin - hit) / 1_000_000.0 * PRICE_IN
-                + pout / 1_000_000.0 * PRICE_OUT;
 
         nCalls++;
         nIn += pin;
         nOut += pout;
         nHit += hit;
-        nCost += c;
+        nCost = nCost.add(c);
         if (ok) {
             LATENCIES.add(total);
         }
 
-        String line = String.format("%s\t%s\t%s\t%s\tin=%d\tout=%d\thit=%d\tcost=%.8f\tttft=%s\ttotal=%dms%s",
-                Instant.now(), scene, ok ? "OK" : "FAIL", MODEL, pin, pout, hit, c,
+        // 日志存 toPlainString，不做格式化 —— 以后想用脚本重新算账，原始值才好用
+        String line = String.format("%s\t%s\t%s\t%s\tin=%d\tout=%d\thit=%d\tcost=%s\tttft=%s\ttotal=%dms%s",
+                Instant.now(), scene, ok ? "OK" : "FAIL", MODEL, pin, pout, hit, c.toPlainString(),
                 ttft < 0 ? "-" : ttft + "ms", total,
                 err == null ? "" : "\terr=" + err.replace('\n', ' '));
 
@@ -458,8 +552,8 @@ public class Chat {
             System.err.println("[记账失败] " + e.getMessage());
         }
 
-        System.out.printf("[账单] %s in=%d out=%d %s%.6f ttft=%s total=%dms%s%n",
-                scene, pin, pout, CUR, c,
+        System.out.printf("[账单] %s in=%d out=%d %s ttft=%s total=%dms%s%n",
+                scene, pin, pout, money(c),
                 ttft < 0 ? "-" : ttft + "ms", total, ok ? "" : " 失败");
     }
 
@@ -477,15 +571,39 @@ public class Chat {
                 调用     %d 次
                 输入     %d token（缓存命中 %d）
                 输出     %d token
-                累计     %s%.6f
+                累计     %s
+                计价     %s  单价 in=%s/1M out=%s/1M
                 平均延迟 %dms   P95 %dms
                 日志     %s
-                """, nCalls, nIn, nHit, nOut, CUR, nCost, avg, p95, LOG.toAbsolutePath());
+                """, nCalls, nIn, nHit, nOut, money(nCost),
+                PEAK ? "高峰时段（全价）" : "空闲时段（半价）",
+                priceText(PRICE_IN), priceText(PRICE_OUT),
+                avg, p95, LOG.toAbsolutePath());
+    }
+
+    /** 当前生效单价（已按峰谷折算），只用于展示。 */
+    static String priceText(BigDecimal peakPrice) {
+        return money(PEAK ? peakPrice : peakPrice.multiply(HALF));
     }
 
     // ================================================================
     // 小工具
     // ================================================================
+
+    /**
+     * 取 {@code choices[0]}。
+     *
+     * <p>fastjson 的 {@code getJSONObject(0)} 对空数组会抛越界，而
+     * 「开了 include_usage 之后的最后一片，choices 是空数组」是<b>常态</b>。
+     * 所有取 choice 的地方统一过这个方法，就不会漏判。
+     */
+    static JSONObject firstChoice(JSONObject root) {
+        if (root == null) {
+            return null;
+        }
+        JSONArray choices = root.getJSONArray("choices");
+        return choices == null || choices.isEmpty() ? null : choices.getJSONObject(0);
+    }
 
     /** 供 Exp 复用：非流式问一次，返回文本，不打印。 */
     static String quick(String prompt, double temperature) throws Exception {
@@ -497,11 +615,17 @@ public class Chat {
             if (resp.statusCode() / 100 != 2) {
                 return null;
             }
-            JsonNode root = JSON.readTree(resp.body());
-            JsonNode u = root.path("usage");
-            bill("quick", true, u.path("prompt_tokens").asInt(), u.path("completion_tokens").asInt(),
-                    u.path("prompt_cache_hit_tokens").asInt(), -1, 0, null);
-            return root.path("choices").path(0).path("message").path("content").asText("");
+            JSONObject root = JSON.parseObject(resp.body());
+            JSONObject u = root.getJSONObject("usage");
+            bill("quick", true,
+                    u == null ? 0 : u.getIntValue("prompt_tokens"),
+                    u == null ? 0 : u.getIntValue("completion_tokens"),
+                    u == null ? 0 : u.getIntValue("prompt_cache_hit_tokens"),
+                    -1, 0, null);
+
+            JSONObject choice = firstChoice(root);
+            JSONObject msg = choice == null ? null : choice.getJSONObject("message");
+            return msg == null ? "" : msg.getString("content");
         } finally {
             TEMP = old;
         }
@@ -510,7 +634,9 @@ public class Chat {
     static void banner() {
         System.out.println("M1 最小版 · 模型 " + MODEL);
         System.out.println("端点 " + BASE + "/chat/completions");
-        System.out.println("单价 in=" + CUR + PRICE_IN + "/1M out=" + CUR + PRICE_OUT + "/1M");
+        System.out.println("单价 in=" + priceText(PRICE_IN) + "/1M  out=" + priceText(PRICE_OUT)
+                + "/1M  cacheHit=" + priceText(PRICE_HIT) + "/1M  → "
+                + (PEAK ? "高峰时段，全价" : "空闲时段，半价"));
         System.out.println("命令 /sync  /stream  /clear  /stats  /exit     (M1_DEBUG_SSE=1 看原始分片)");
     }
 
@@ -533,6 +659,17 @@ public class Chat {
             return v == null || v.isBlank() ? def : Double.parseDouble(v.trim());
         } catch (NumberFormatException e) {
             return def;
+        }
+    }
+
+    /** 读金额类配置。用 String 构造而不是 new BigDecimal(double) —— 后者会把 0.1 变成 0.1000000000000000055… */
+    static BigDecimal dec(String key, String def) {
+        String v = System.getenv(key);
+        try {
+            return new BigDecimal(v == null || v.isBlank() ? def : v.trim());
+        } catch (NumberFormatException e) {
+            System.err.println("[配置] " + key + " 不是合法数字，回退到默认值 " + def);
+            return new BigDecimal(def);
         }
     }
 }

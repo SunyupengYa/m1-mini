@@ -1,6 +1,7 @@
 package m1;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
 
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
@@ -172,15 +173,20 @@ public class Exp {
         body.put("temperature", 0);
         body.put("response_format", Map.of("type", "json_object"));
 
-        HttpResponse<String> resp = Chat.post(Chat.JSON.writeValueAsString(body));
+        HttpResponse<String> resp = Chat.post(JSON.toJSONString(body));
         if (resp.statusCode() / 100 != 2) {
             System.out.println("请求失败 HTTP " + resp.statusCode() + " " + Chat.brief(resp.body()));
             return;
         }
 
-        JsonNode root = Chat.JSON.readTree(resp.body());
-        String raw = root.path("choices").path(0).path("message").path("content").asText("");
-        String finish = root.path("choices").path(0).path("finish_reason").asText("");
+        JSONObject root = JSON.parseObject(resp.body());
+        JSONObject choice = Chat.firstChoice(root);
+        JSONObject msg = choice == null ? null : choice.getJSONObject("message");
+        String raw = msg == null ? "" : msg.getString("content");
+        String finish = choice == null ? null : choice.getString("finish_reason");
+        if (finish == null) {
+            finish = "";
+        }
 
         System.out.println("原始输出：\n" + raw + "\n");
         System.out.println("finish_reason = " + finish);
@@ -197,10 +203,10 @@ public class Exp {
             return;
         }
         try {
-            JsonNode obj = Chat.JSON.readTree(cleaned);
-            System.out.println("解析成功：name=" + obj.path("name").asText()
-                    + " count=" + obj.path("count").asInt()
-                    + " amount=" + obj.path("amount").asDouble());
+            JSONObject obj = JSON.parseObject(cleaned);
+            System.out.println("解析成功：name=" + obj.getString("name")
+                    + " count=" + obj.getIntValue("count")
+                    + " amount=" + obj.getDoubleValue("amount"));
         } catch (Exception e) {
             // 注意：格式噪声可以修，语义错误不能修。字段名写错、类型错，修了只会更糟
             System.out.println("解析失败：" + e.getMessage());

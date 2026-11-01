@@ -18,11 +18,21 @@
   </properties>
 
   <dependencies>
-    <!-- 唯一的依赖。不用 DTO，直接拿 JsonNode 取字段。 -->
+    <!--
+      唯一的依赖：阿里 fastjson。
+
+      用的是 2.x（artifactId=fastjson2）而不是 1.x。1.x 的 autoType 反序列化漏洞
+      （CVE-2022-25845 等）在安全评审里基本是一票否决，且阿里官方早已停止为 1.x 做安全修复。
+      2.x 是重写版，默认关闭 autoType，API 也更干净。写 import 时注意包名是
+      com.alibaba.fastjson2，不是 com.alibaba.fastjson。
+
+      这里只用它做「JSON 文本 ↔ JSONObject/JSONArray」的解析，不反序列化到自定义 DTO，
+      所以 autoType 相关风险天然不存在。
+    -->
     <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-databind</artifactId>
-      <version>2.17.2</version>
+      <groupId>com.alibaba.fastjson2</groupId>
+      <artifactId>fastjson2</artifactId>
+      <version>2.0.66</version>
     </dependency>
   </dependencies>
 

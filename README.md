@@ -2,8 +2,10 @@
 
 M1「裸调模型 API」的最小实现。**3 个文件，1065 行，覆盖路线图 M1 的全部七个任务。**
 
-不建 DTO、不写 Builder、不分层。请求体用 `Map` 拼，响应用 `JsonNode` 取字段。
+不建 DTO、不写 Builder、不分层。请求体用 `Map` 拼，响应用 fastjson 的 `JSONObject` 取字段。
 代价是没有编译期类型检查，换来的是你能直接看到报文长什么样。
+
+金额一律用 `BigDecimal` 算，不用 double —— 理由和坑都写在 `Chat.cost()` 的注释里。
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
@@ -92,7 +94,10 @@ breaker  → 第 3 次: 失败 2ms 状态=OPEN 假服务端累计=3
 | 去掉 `stream_options` | `/stats` 里 token 全是 0 | 流式默认不返回 usage |
 | `backoff()` 里去掉 jitter | 连续跑几次，等待时间一模一样 | 重试风暴的成因 |
 | `Breaker` 阈值改成 1 | 第一次失败就全拒 | 阈值太敏感等于没有服务 |
-| `pickJson` 直接用 `readTree(raw)` | 偶尔解析失败 | 模型会加 ```json 围栏和废话 |
+| `pickJson` 直接用 `parseObject(raw)` | 偶尔解析失败 | 模型会加 ```json 围栏和废话 |
+| `cost()` 里 `divide(MILLION, 10, HALF_UP)` 改成 `divide(MILLION)` | 平时正常，遇到除不尽直接崩 | BigDecimal 不写精度就是定时炸弹 |
+| `money()` 里 `toPlainString()` 换回 `toString()` | 极小金额打印成 `5.85E-5` | 科学计数法会把日志解析脚本搞坏 |
+| `M1_PEAK=peak` 强制高峰价 | 同一笔调用金额正好翻倍 | 峰谷定价是真的，记账必须跟着时间走 |
 
 ---
 
@@ -110,8 +115,8 @@ breaker  → 第 3 次: 失败 2ms 状态=OPEN 假服务端累计=3
 | `M1_API_KEY` | — | 也认 `DEEPSEEK_API_KEY` |
 | `M1_BASE_URL` | `https://api.deepseek.com` | 换厂商只改这个 |
 | `M1_MODEL` | `deepseek-v4-flash` | `deepseek-chat` 已于 2026-07-24 废弃 |
-| `M1_PRICE_IN` / `M1_PRICE_OUT` / `M1_PRICE_HIT` | 0.14 / 0.28 / 0.0028 | 每百万 token，**跑前核对官网** |
-| `M1_CURRENCY` | `$` | 只影响打印 |
+| `M1_PRICE_IN` / `M1_PRICE_OUT` / `M1_PRICE_HIT` | 3 / 9 / 0.1 | **元**/百万 token，填**高峰价**。跑前核对官网 |
+| `M1_PEAK` | auto | auto / peak / off。工作日 9-12、14-18 为高峰，空闲时段自动按半价算 |
 | `M1_TIMEOUT` | 120 | 秒。是整个响应的超时，不是首字节 |
 | `M1_DEBUG_SSE` | 0 | 1 = 打印每次 read 的原始片段 + 缓冲缩到 16 字符 |
 | `M1_MOCK_MODE` | stream | stream / nodone / sync / 429 / 500 / slow / badjson |
