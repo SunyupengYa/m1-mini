@@ -381,14 +381,18 @@ public class Chat {
 
     /** 找事件分隔符的位置和长度；找不到返回 null（说明还是半包，正常）。 */
     static int[] boundary(StringBuilder buf) {
-        // TODO ①-a：返回 {位置, 长度}
-        //   "\n\n"      → 长度 2
-        //   "\r\n\r\n"  → 长度 4
-        //   都找不到 → null；两个都找到 → 取更靠前的那个
-        //
-        // 常见错误：只认 \n\n。碰到发 CRLF 的服务端就永远不产出事件，
-        // 表现是「界面一个字节都不显示」，而且极难看出是哪里的问题。
-        throw new UnsupportedOperationException("TODO ①-a: Chat.boundary 未实现");
+        int lf = buf.indexOf("\n\n");
+        int crlf = buf.indexOf("\r\n\r\n");
+        if (lf < 0 && crlf < 0) {
+            return null;
+        }
+        if (crlf < 0) {
+            return new int[]{lf, 2};
+        }
+        if (lf < 0) {
+            return new int[]{crlf, 4};
+        }
+        return lf < crlf ? new int[]{lf, 2} : new int[]{crlf, 4};
     }
 
     /** 从一个事件块里取出 data 内容（剥掉前缀、跳过注释行、多行拼接）。 */
