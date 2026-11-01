@@ -466,7 +466,7 @@ public class Chat {
      * 一旦除不尽（比如除以 3）就直接抛 ArithmeticException —— 这是 BigDecimal 最常见的线上事故。
      */
     static BigDecimal cost(int pin, int pout, int phit) {
-        // TODO ②-a：三段相加，再按峰谷折价（整个方法 8 行）
+        // TODO ②-a：三段相加，再按峰谷折价（逻辑约 6 行）
         //   缓存命中   hit         × PRICE_HIT
         //   未命中     (pin - hit) × PRICE_IN
         //   输出       pout        × PRICE_OUT
@@ -490,15 +490,27 @@ public class Chat {
     /** 一次调用记一行：屏幕一行 + 追加到 logs/calls.log。 */
     static void bill(String scene, boolean ok, int pin, int pout, int phit,
                      long ttft, long total, String err) {
-        // TODO ②-b：四步
-        //   1. cost(pin, pout, phit) 算钱
-        //   2. 累加 nCalls / nIn / nOut / nHit / nCost
-        //      nCost 是 BigDecimal，必须 add()，写成 += 会退化成 double 精度
-        //      ok 时把 total 塞进 LATENCIES（P95 要用）
-        //   3. 拼一行 TSV 追加到 LOG：时间 场景 成败 in out hit cost ttft total [err]
-        //      金额用 c.toPlainString()，用 toString 会变成 5.85E-5 这种科学计数法
-        //   4. 屏幕打一行给人看，失败时带上原因
+        // TODO ②-b：四步，约 12 行
+        //   1. BigDecimal c = cost(pin, pout, phit);
+        //   2. 累加：nCalls++ / nIn += pin / nOut += pout / nHit += hit
+        //      nCost = nCost.add(c)    ← 必须用 add，写成 += 会退化成 double
+        //      ok 时 LATENCIES.add(total)，给 P95 用
+        //   3. writeLog(拼好的一行)    ← 文件 IO 已经给你了，你只管拼串，别自己写 Files
+        //      拼串内容：时间 场景 成败 in out hit cost ttft total [err]
+        //      金额用 c.toPlainString()，toString 会变成 5.85E-5
+        //   4. System.out.printf 打一行给人看，失败时带上原因
         throw new UnsupportedOperationException("TODO ②-b: Chat.bill 未实现");
+    }
+
+    /** 把一行日志追加到 logs/calls.log。这是 IO 样板，不是学习点，直接给你。 */
+    static void writeLog(String line) {
+        try {
+            Files.createDirectories(LOG.getParent());
+            Files.writeString(LOG, line + System.lineSeparator(), StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            System.err.println("[记账失败] " + e.getMessage());
+        }
     }
 
     static void stats() {
