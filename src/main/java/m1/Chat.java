@@ -61,17 +61,18 @@ public class Chat {
     static String MODEL = env("M1_MODEL", "deepseek-v4-flash");
 
     /**
-     * 单价：<b>元 / 百万 token</b>，和官网中文价目表口径一致。
+     * 单价：<b>元 / 百万 token</b>，按官方美元牌价折算（1 USD ≈ 6.67 CNY，2026-11-01 核对）。
      *
-     * <p>默认值是 deepseek 高峰时段价（2026-08-17 调价后）。空闲时段官方按半价计，
-     * 这里会自动折半，见 {@link #PEAK}。
+     * <p>deepseek-v4-flash 官方牌价：输入（未命中）谷值 $0.15 / 高峰 $0.30，
+     * 输出谷值 $0.60 / 高峰 $1.20，缓存命中谷值 $0.007 / 高峰 $0.014（每百万 token）。
+     * 折算成人民币后取高峰价作为默认值；空闲时段官方按半价计，这里自动折半，见 {@link #PEAK}。
      *
      * <p><b>价格变动很频繁，跑之前去官网核对一遍</b>：
-     * api-docs.deepseek.com/zh-cn/quick_start/pricing
+     * api-docs.deepseek.com/quick_start/pricing
      */
-    static final BigDecimal PRICE_IN = dec("M1_PRICE_IN", "3");      // 输入，缓存未命中
-    static final BigDecimal PRICE_OUT = dec("M1_PRICE_OUT", "9");    // 输出
-    static final BigDecimal PRICE_HIT = dec("M1_PRICE_HIT", "0.1");  // 输入，缓存命中
+    static final BigDecimal PRICE_IN = dec("M1_PRICE_IN", "2.0");      // 输入，缓存未命中
+    static final BigDecimal PRICE_OUT = dec("M1_PRICE_OUT", "8.0");    // 输出
+    static final BigDecimal PRICE_HIT = dec("M1_PRICE_HIT", "0.09");   // 输入，缓存命中
 
     static final String CUR = "¥";
 

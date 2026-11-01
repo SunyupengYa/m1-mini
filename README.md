@@ -145,7 +145,7 @@ breaker  → 第 3 次: 失败 2ms 状态=OPEN 假服务端累计=3
 | `M1_API_KEY` | — | 也认 `DEEPSEEK_API_KEY` |
 | `M1_BASE_URL` | `https://api.deepseek.com` | 换厂商只改这个 |
 | `M1_MODEL` | `deepseek-v4-flash` | `deepseek-chat` 已于 2026-07-24 废弃 |
-| `M1_PRICE_IN` / `M1_PRICE_OUT` / `M1_PRICE_HIT` | 3 / 9 / 0.1 | **元**/百万 token，填**高峰价**。跑前核对官网 |
+| `M1_PRICE_IN` / `M1_PRICE_OUT` / `M1_PRICE_HIT` | 2.0 / 8.0 / 0.09 | **元**/百万 token，填**高峰价**。2026-11-01 按官方美元牌价折算核对过（$0.30/$1.20/$0.014，1 USD≈6.67 CNY），跑前仍建议再核官网 |
 | `M1_PEAK` | auto | auto / peak / off。工作日 9-12、14-18 为高峰，空闲时段自动按半价算 |
 | `M1_TIMEOUT` | 120 | 秒。是整个响应的超时，不是首字节 |
 | `M1_DEBUG_SSE` | 0 | 1 = 打印每次 read 的原始片段 + 缓冲缩到 16 字符 |
