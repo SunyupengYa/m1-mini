@@ -397,13 +397,34 @@ public class Chat {
 
     /** 从一个事件块里取出 data 内容（剥掉前缀、跳过注释行、多行拼接）。 */
     static String extractData(String block) {
+        if (block.isBlank()){
+            return "";
+        }
+        StringBuffer sb = new StringBuffer();
+        for (String line : block.split("\r?\n")) {
+            if (line.isBlank() || line.startsWith(":")){
+                continue;
+            }
+            if (line.startsWith("data:")){
+                String newLine = line.substring(5);
+                if (newLine.startsWith(" ")){
+                    newLine = newLine.substring(1);
+                }
+                if (!sb.isEmpty()){
+                    sb.append("\n");
+                }
+                sb.append(newLine);
+            }
+
+        }
+        return sb.toString();
         // TODO ①-b：按行处理一个事件块
         //   空行                → 跳过
         //   以 ":" 开头          → 心跳注释，跳过
         //   以 "data:" 开头      → 取冒号后的内容；规范允许一个前导空格，吃掉它
         //                         多行 data 要用 \n 拼接（少见，但规范如此）
         //   其余行               → 忽略
-        throw new UnsupportedOperationException("TODO ①-b: Chat.extractData 未实现");
+//        throw new UnsupportedOperationException("TODO ①-b: Chat.extractData 未实现");
     }
 
     // ================================================================
