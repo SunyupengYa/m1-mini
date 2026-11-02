@@ -236,6 +236,9 @@ public class Exp {
      * 退避时间完全相同的话它们会在同一毫秒继续打过来 —— 重试风暴比原问题更严重。
      */
     static long backoff(int attempt) {
+        long base = Math.min(500L << (attempt - 1), 8_000);   // 指数 + 封顶，一步到位
+        double jitter = 0.8 + Math.random() * 0.4;
+        return Math.max(1, (long) (base * jitter));
         // TODO ③：指数退避 + 抖动（5 行）
         //   - 基数 500ms，每次乘 2：500 / 1000 / 2000 / 4000…
         //   - 用 maxDelay（比如 8000）封顶，否则第 10 次就要等 4 分钟
@@ -245,7 +248,6 @@ public class Exp {
         // 「为什么必须抖动」是高频面试题：200 个实例同时被 429，
         // 退避时间完全相同的话，它们会在同一毫秒继续打过来 ——
         // 这波重试风暴比原来的限流更致命。
-        throw new UnsupportedOperationException("TODO ③: Exp.backoff 未实现");
     }
 
     /**

@@ -368,6 +368,37 @@ public class Chat {
         //   3. [DONE] 之后的数据要丢掉
         //
         // 具体步骤：
+        StringBuilder buf = new StringBuilder();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+        char[] chunk = new char[DEBUG_SSE ? 16 : 256];
+        int n;
+        while ((n = reader.read(chunk)) != -1){
+            buf.append(chunk, 0, n);
+
+            if (DEBUG_SSE) {
+                System.err.println("[recv " + n + "] "
+                        + new String(chunk, 0, n).replace("\r", "\\r").replace("\n", "\\n"));
+            }
+
+            int[] bd;
+            while ((bd = boundary(buf)) != null){
+                String block = buf.substring(0, bd[0]);
+                buf.delete(0,bd[0] + bd[1]);
+
+                String data = extractData(block);
+                if (data.isBlank()){
+                    continue;
+                }
+                if ("[DONE]".equals(data)){
+                    return;
+                }
+                onData.accept(data);
+            }
+        }
+        String lastData = extractData(buf.toString());
+        if (!lastData.isBlank() && !"[DONE]".equals(lastData)){
+            onData.accept(lastData);
+        }
         //   a. 用 BufferedReader + InputStreamReader(UTF_8) 包住 in
         //   b. char[] 缓冲大小取 (DEBUG_SSE ? 16 : 256) —— 开大了半包永远不出现
         //   c. 主循环 reader.read(chunk)，返回 -1 结束；每次读到就 append 到 StringBuilder buf
@@ -376,7 +407,7 @@ public class Chat {
         //      → 空串跳过 → "[DONE]" 直接 return → 否则 onData.accept
         //   e. 循环结束后再 flush 一次残留（服务端可能不发结尾空行）
         // ============================================================
-        throw new UnsupportedOperationException("TODO ①: Chat.readSse 未实现");
+//        throw new UnsupportedOperationException("TODO ①: Chat.readSse 未实现");
     }
 
     /** 找事件分隔符的位置和长度；找不到返回 null（说明还是半包，正常）。 */
