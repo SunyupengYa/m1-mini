@@ -19,7 +19,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.Instant;
 import java.time.Duration;
 import java.util.*;
 
@@ -80,6 +79,7 @@ public class Chat {
     static final int MONEY_SCALE = 10;
     static final BigDecimal MILLION = BigDecimal.valueOf(1_000_000);
     static final BigDecimal HALF = new BigDecimal("0.5");
+    static final Map<String, String> THINKING = Map.of("type", "disabled");
 
     /**
      * 当前是否高峰时段（每次调用实时判定，不再类初始化时焊死）。
@@ -468,7 +468,7 @@ public class Chat {
         body.put("messages", messages);
         body.put("stream", stream);
         body.put("temperature", TEMP);
-//        body.put("thinking", Map.of("type",THINKING_TYPE));
+        body.put("thinking", THINKING);
         if (stream) {
             // 少了这一行，最后一片不会带 usage，账单永远算不准
             body.put("stream_options", Map.of("include_usage", true));
