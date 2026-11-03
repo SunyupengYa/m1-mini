@@ -72,6 +72,9 @@ public class Mock implements AutoCloseable {
         hits.incrementAndGet();
         String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         boolean wantStream = body.contains("\"stream\":true");
+        // 按真实协议：流式请求只有带了 stream_options.include_usage，最后一个事件才带 usage。
+        // 不校验这个的话，客户端删掉 stream_options 也照样收到账单，实验④就做不出症状。
+        boolean wantUsage = body.contains("include_usage");
 
         try {
             switch (mode) {
@@ -82,11 +85,11 @@ public class Mock implements AutoCloseable {
                     Thread.sleep(SLOW_MS);
                     json(ex, 200, syncBody());
                 }
-                case "nodone" -> sse(ex, false);
+                case "nodone" -> sse(ex, false, false);
                 case "sync" -> json(ex, 200, syncBody());
                 default -> {
                     if (wantStream) {
-                        sse(ex, true);
+                        sse(ex, true, wantUsage);
                     } else {
                         json(ex, 200, syncBody());
                     }
@@ -103,7 +106,8 @@ public class Mock implements AutoCloseable {
      * 流式响应。关键在 {@link #writeSplit}：它把每个事件拆成 3 段分别 flush，
      * 客户端一定会收到「半个 JSON」—— 不做缓冲的实现到这里必崩。
      */
-    private void sse(HttpExchange ex, boolean sendDone) throws IOException, InterruptedException {
+    private void sse(HttpExchange ex, boolean sendDone, boolean sendUsage)
+            throws IOException, InterruptedException {
         ex.getResponseHeaders().add("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().add("Cache-Control", "no-cache");
         ex.sendResponseHeaders(200, 0);     // 0 = chunked，长度未知
@@ -119,11 +123,13 @@ public class Mock implements AutoCloseable {
                 writeSplit(out, last && !sendDone ? event : event + "\n\n");
                 Thread.sleep(20);
             }
-            if (sendDone) {
+            if (sendUsage) {
                 // usage 单独一片，choices 是空数组 —— 不判空就 NPE 的那种 chunk
                 writeSplit(out, "data: {\"id\":\"mock-1\",\"model\":\"mock\",\"choices\":[],"
                         + "\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":9,"
                         + "\"prompt_cache_hit_tokens\":0}}\n\n");
+            }
+            if (sendDone) {
                 writeSplit(out, "data: [DONE]\n\n");
             }
             out.flush();
